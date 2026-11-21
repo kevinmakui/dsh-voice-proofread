@@ -1,0 +1,6 @@
+- insert:
+    - id: voice-proofread
+      name: '@local/dsh-voice-proofread'
+      config:
+        provider: ''
+        model: ''
