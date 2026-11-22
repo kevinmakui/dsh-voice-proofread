@@ -74,34 +74,10 @@ test('selecting a model saves both route fields and enables speech proofreading'
   const select = root.root.findByProps({ id: 'voice-proofread-model' })
   assert.equal(root.root.findAllByType('option')[1].children[0], 'Provider / Model')
   await act(async () => { select.props.onChange({ target: { value: JSON.stringify(['p', 'm']) } }) })
-  assert.equal(root.root.findAllByType('button')[1].props.disabled, true)
-  await act(async () => { await root.root.findAllByType('button')[0].props.onClick() })
   assert.deepEqual(mutations, { ops: [{ op: 'set', path: ['provider'], value: 'p' },
     { op: 'set', path: ['model'], value: 'm' }], revision: 4 })
-  await act(async () => { await root.root.findAllByType('button')[1].props.onClick() })
-  assert.equal(enabled, 'sensevoice-proofread')
-  await act(async () => { root.unmount() })
-})
-
-test('a stale model selection does not overwrite newer settings', async () => {
-  let module, component, registration, listener, writes = 0
-  vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'),
-    { window: { __ModuleLoader__: { load(value) { module = value } } }, navigator: { language: 'zh-CN' } })
-  const plugin = module.factory(() => React)
-  let snapshot = { status: 'ready', writable: true, revision: 1, value: { provider: '', model: '' } }
-  const form = { getSnapshot: () => snapshot, subscribe(fn) { listener = fn; return () => {} },
-    async mutate() { writes++; return true } }
-  const remote = { $on() { return () => {} }, session: { async modelCatalog() { return { ok: true, value: { groups: [
-    { id: 'p', name: 'P', models: [{ id: 'm', name: 'M' }] }], failures: [] } } } } }
-  plugin.apply({ effect(fn) { return fn() }, shortcuts: { register() { return () => {} } }, configForms: { get: () => form }, remote, get: () => remote.speech, on() { return () => {} },
-    slots: { inject(_, callback) { callback() }, register(options, view) { registration = options; component = view } } })
-  let root
-  await act(async () => { root = TestRenderer.create(React.createElement(component, registration.inject())) })
-  await act(async () => { root.root.findByProps({ id: 'voice-proofread-model' }).props.onChange({ target: { value: JSON.stringify(['p', 'm']) } }) })
-  await act(async () => { snapshot = { ...snapshot, revision: 2 }; listener() })
   await act(async () => { await root.root.findAllByType('button')[0].props.onClick() })
-  assert.equal(writes, 0)
-  assert.match(root.root.findByProps({ role: 'alert' }).children[0], /设置已改变/)
+  assert.equal(enabled, 'sensevoice-proofread')
   await act(async () => { root.unmount() })
 })
 
@@ -183,10 +159,6 @@ test('model selection displays the catalog and protects an unsaved choice', asyn
   assert.equal(root.root.findAllByProps({ type: 'search' }).length, 0)
   const options = root.root.findByProps({ id: 'voice-proofread-model' }).findAllByType('option').map(option => option.children[0])
   assert.deepEqual(options, ['选择已配置的模型', 'Provider / Alpha', 'Provider / Beta', 'Provider / Gamma'])
-  await act(async () => { root.root.findByProps({ id: 'voice-proofread-model' }).props.onChange({ target: { value: JSON.stringify(['p', 'b']) } }) })
-  assert.equal(root.root.findByProps({ id: 'voice-proofread-timeout' }).props.disabled, true)
-  await act(async () => { root.root.findByProps({ id: 'voice-proofread-model' }).props.onChange({ target: { value: JSON.stringify(['p', 'a']) } }) })
-  assert.equal(root.root.findByProps({ id: 'voice-proofread-timeout' }).props.disabled, false)
   await act(async () => { root.unmount() })
 })
 
@@ -233,6 +205,36 @@ test('speech activation failure is displayed and does not report success', async
   await act(async () => { root.unmount() })
 })
 
+test('activation button follows the selected speech provider', async () => {
+  let module, component, registration, push, disposed = false
+  vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'),
+    { window: { __ModuleLoader__: { load(value) { module = value } } }, navigator: { language: 'zh-CN' } })
+  const snapshot = { status: 'ready', writable: true, revision: 1, value: { provider: 'p', model: 'm' } }
+  const form = { getSnapshot: () => snapshot, subscribe() { return () => {} } }
+  let wake, queue = []
+  const stream = { async *[Symbol.asyncIterator]() {
+    while (!disposed) {
+      if (!queue.length) await new Promise(resolve => { wake = resolve })
+      while (queue.length) yield { value: { selection: { providerId: queue.shift() } }, accept() {} }
+    }
+  }, async dispose() { disposed = true; wake?.() } }
+  push = id => { queue.push(id); wake?.() }
+  const remote = { $on() { return () => {} }, $stream() { return stream }, session: { async modelCatalog() {
+    return { ok: true, value: { groups: [{ id: 'p', name: 'P', models: [{ id: 'm', name: 'M' }] }], failures: [] } }
+  } } }
+  module.factory(() => React).apply({ effect(fn) { return fn() }, shortcuts: { register() { return () => {} } },
+    configForms: { get: () => form }, remote, get: () => ({ follow() {} }), on() { return () => {} },
+    slots: { inject(_, callback) { callback() }, register(options, view) { registration = options; component = view } } })
+  let root
+  await act(async () => { root = TestRenderer.create(React.createElement(component, registration.inject())) })
+  await act(async () => { push('sensevoice-proofread') })
+  assert.equal(root.root.findAllByType('button').find(item => item.children[0] === '语音校对已启用').props.disabled, true)
+  await act(async () => { push('sensevoice-local') })
+  assert.equal(root.root.findAllByType('button').find(item => item.children[0] === '启用语音校对').props.disabled, false)
+  await act(async () => { root.unmount() })
+  assert.equal(disposed, true)
+})
+
 test('missing speech service has a specific recovery message', async () => {
   let module, component, registration
   vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'),
@@ -268,11 +270,9 @@ test('a refused save clears the stale choice so it can be selected again', async
   await act(async () => { root = TestRenderer.create(React.createElement(component, registration.inject())) })
   const select = root.root.findByProps({ id: 'voice-proofread-model' })
   await act(async () => { select.props.onChange({ target: { value: JSON.stringify(['p', 'm']) } }) })
-  await act(async () => { await root.root.findAllByType('button')[0].props.onClick() })
   assert.equal(select.props.value, '')
   assert.match(root.root.findByProps({ role: 'alert' }).children[0], /保存失败/)
   await act(async () => { select.props.onChange({ target: { value: JSON.stringify(['p', 'm']) } }) })
-  await act(async () => { await root.root.findAllByType('button')[0].props.onClick() })
   assert.equal(attempts, 2)
   await act(async () => { root.unmount() })
 })

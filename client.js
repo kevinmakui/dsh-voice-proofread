@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
       fallback: '校对失败时会直接插入未经校对的识别原文；当前录音界面不会单独提示，请发送前检查文字。',
       loading: '正在读取模型…', unavailable: '无法读取模型目录。', partial: '部分模型提供方不可用。',
       missing: '已保存的模型当前不在目录中，请检查模型配置或重新选择。',
-      activate: '启用语音校对', activating: '正在启用…', activated: '语音校对已启用。', activationFailed: '无法启用语音校对。请先启用内置语音输入并等待本地识别器就绪。',
+      activate: '启用语音校对', enabled: '语音校对已启用', activating: '正在启用…', activated: '语音校对已启用。', activationFailed: '无法启用语音校对。请先启用内置语音输入并等待本地识别器就绪。',
       speechUnavailable: '内置语音输入服务不可用。请先在插件中启用语音输入。',
     } : {
       title: 'Proofreading model', prompt: 'Choose a configured model', save: 'Save', saving: 'Saving…', conflict: 'Settings changed. Choose the model again.',
@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
       failed: 'Could not save; settings may have changed. Try again.',
       loading: 'Loading models…', unavailable: 'Could not load models.', partial: 'Some model providers are unavailable.',
       missing: 'The saved model is not currently available in the catalog. Check its configuration or choose another.',
-      activate: 'Enable voice proofreading', activating: 'Enabling…', activated: 'Voice proofreading is enabled.', activationFailed: 'Could not enable voice proofreading. Enable built-in voice input and wait for the local recognizer first.',
+      activate: 'Enable voice proofreading', enabled: 'Voice proofreading enabled', activating: 'Enabling…', activated: 'Voice proofreading is enabled.', activationFailed: 'Could not enable voice proofreading. Enable built-in voice input and wait for the local recognizer first.',
       speechUnavailable: 'The built-in voice input service is unavailable. Enable voice input in Plugins first.',
     }
     function Settings({ form, remote, subscribeCatalog, getSpeech }) {
@@ -53,10 +53,28 @@ window.__ModuleLoader__.load({
       const [catalogAttempt, setCatalogAttempt] = React.useState(0)
       const [failure, setFailure] = React.useState('')
       const [choice, setChoice] = React.useState('')
-      const [choiceRevision, setChoiceRevision] = React.useState(undefined)
       const [saving, setSaving] = React.useState(false)
       const [activating, setActivating] = React.useState(false)
       const [notice, setNotice] = React.useState('')
+      const [speechSelection, setSpeechSelection] = React.useState(undefined)
+      React.useEffect(() => {
+        const speech = getSpeech()
+        if (!speech?.follow || !remote.$stream) return
+        let active = true
+        const stream = remote.$stream({ name: 'Voice proofreading selection',
+          open: signal => speech.follow(signal), ended: () => new Error('Speech selection stream ended'),
+          carrierFailed: () => { if (active) setSpeechSelection(undefined) } })
+        ;(async () => {
+          try {
+            for await (const item of stream) {
+              if (!active) break
+              setSpeechSelection(item.value.selection?.providerId)
+              item.accept()
+            }
+          } catch { if (active) setSpeechSelection(undefined) }
+        })()
+        return () => { active = false; void stream.dispose() }
+      }, [getSpeech, remote])
       React.useEffect(() => {
         return subscribeCatalog(() => { setCatalog(null); setFailure(''); setCatalogAttempt(attempt => attempt + 1) })
       }, [subscribeCatalog])
@@ -70,25 +88,22 @@ window.__ModuleLoader__.load({
         return () => { active = false }
       }, [remote, catalogAttempt])
       const current = JSON.stringify([state.value?.provider || '', state.value?.model || ''])
+      const proofreadingEnabled = speechSelection === 'sensevoice-proofread'
       const selected = choice || current
       const options = catalog?.groups.flatMap(group => group.models.map(model => ({
         value: JSON.stringify([group.id, model.id]), label: `${group.name} / ${model.name}`,
       }))) || []
-      async function save() {
-        const option = options.find(item => item.value === selected)
-        if (!option || saving) return
-        if (choiceRevision === undefined || choiceRevision !== state.revision) {
-          setChoice(''); setChoiceRevision(undefined); setFailure(text.conflict); return
-        }
+      async function save(next) {
+        const option = options.find(item => item.value === next)
+        if (!option || saving || next === current) return
         const [provider, model] = JSON.parse(option.value)
-        setSaving(true); setFailure('')
+        setChoice(next); setSaving(true); setFailure(''); setNotice('')
         try {
           const ok = await form.mutate([{ op: 'set', path: ['provider'], value: provider },
-            { op: 'set', path: ['model'], value: model }], choiceRevision)
-          if (!ok) { setChoice(''); setChoiceRevision(undefined); setFailure(text.failed) }
-          else { setChoice(''); setChoiceRevision(undefined) }
+            { op: 'set', path: ['model'], value: model }], state.revision)
+          if (!ok) setFailure(text.failed)
         } catch { setFailure(text.failed) }
-        finally { setSaving(false) }
+        finally { setChoice(''); setSaving(false) }
       }
       async function activate() {
         if (activating) return
@@ -98,6 +113,7 @@ window.__ModuleLoader__.load({
         try {
           const result = await speech.configure({ providerId: 'sensevoice-proofread' })
           if (!result.ok) throw new Error(result.error.message)
+          setSpeechSelection('sensevoice-proofread')
           setNotice(text.activated)
         } catch { setFailure(text.activationFailed) }
         finally { setActivating(false) }
@@ -109,7 +125,7 @@ window.__ModuleLoader__.load({
         try {
           const ok = await form.mutate([{ op: 'set', path: ['timeoutSeconds'], value: seconds }], state.revision)
           if (!ok) setFailure(text.timeoutFailed)
-          else { setChoice(''); setChoiceRevision(undefined) }
+          else setChoice('')
         } catch { setFailure(text.timeoutFailed) }
         finally { setSaving(false) }
       }
@@ -119,16 +135,10 @@ window.__ModuleLoader__.load({
         h('p', null, text.fallback),
         h('select', { id: 'voice-proofread-model', style: { width: '100%', maxWidth: 360, minWidth: 0, textOverflow: 'ellipsis' }, value: options.some(option => option.value === selected) ? selected : '',
           disabled: !catalog || state.status !== 'ready' || !state.writable || saving,
-          onChange: event => {
-            const next = event.target.value
-            setChoice(next === current ? '' : next)
-            setChoiceRevision(next && next !== current ? state.revision : undefined)
-            setFailure('')
-          } },
+          onChange: event => { void save(event.target.value) } },
         h('option', { value: '' }, catalog ? text.prompt : text.loading),
         options.map(option => h('option', { key: option.value, value: option.value, title: option.label }, option.label))),
         h('label', { htmlFor: 'voice-proofread-timeout' }, text.timeout),
-        choice && h('p', { role: 'status' }, text.saveChoiceFirst),
         h('select', { id: 'voice-proofread-timeout', style: { width: '100%', maxWidth: 160 }, value: state.value?.timeoutSeconds ?? 30,
           disabled: saving || !!choice || state.status !== 'ready' || !state.writable, onChange: saveTimeout },
         [10, 20, 30, 60].map(seconds => h('option', { key: seconds, value: seconds }, `${seconds} ${text.seconds}`))),
@@ -138,9 +148,9 @@ window.__ModuleLoader__.load({
         failure && h('p', { role: 'alert' }, failure),
         !catalog && failure && h('button', { type: 'button', onClick: () => { setFailure(''); setCatalogAttempt(attempt => attempt + 1) } }, zh ? '重试读取模型' : 'Retry loading models'),
         notice && h('p', { role: 'status' }, notice),
-        h('button', { type: 'button', disabled: saving || !choice || choice === current || !state.writable || !options.some(option => option.value === choice), onClick: save }, saving ? text.saving : text.save),
-        h('button', { type: 'button', disabled: activating || saving || !!choice || state.status !== 'ready' || !catalog || !options.some(option => option.value === current), onClick: activate },
-          activating ? text.activating : text.activate))
+        saving && h('p', { role: 'status' }, text.saving),
+        h('button', { type: 'button', disabled: activating || proofreadingEnabled || saving || !!choice || state.status !== 'ready' || !catalog || !options.some(option => option.value === current), onClick: activate },
+          activating ? text.activating : proofreadingEnabled ? text.enabled : text.activate))
     }
     return {
       inject: ['slots', 'configForms', 'remote', 'remote.session', 'shortcuts'],
